@@ -71,7 +71,11 @@ class ScaleInvDet:
         Returns:
             np.ndarray: shape (1, k), k = 2 * ((int(6 * sigma + 1) - 1) // 2) + 1.
         """
-        raise NotImplementedError("Implement this method")
+        k = int(6 * sigma + 1)
+        half = (k - 1) // 2
+        x = np.arange(-half, half + 1)
+        g = (1 / (sigma * np.sqrt(2 * np.pi))) * np.exp(-(x ** 2) / (2 * sigma ** 2))
+        return np.expand_dims(g, axis=0)
 
     def gauss_2nd_deriv_kernel(self, sigma):
         """Step 2 — the second derivative of the 1D Gaussian, as a 1 x k row vector.
@@ -82,7 +86,12 @@ class ScaleInvDet:
         Returns:
             np.ndarray: shape (1, k) — the same size as gauss_kernel(sigma).
         """
-        raise NotImplementedError("Implement this method")
+        k = int(6 * sigma + 1)
+        half = (k - 1) // 2
+        x = np.arange(-half, half + 1)
+        g = (1 / (sigma * np.sqrt(2 * np.pi))) * np.exp(-(x ** 2) / (2 * sigma ** 2))
+        gxx = g * (x ** 2 - sigma ** 2) / (sigma ** 4)
+        return np.expand_dims(gxx, axis=0)
 
     def second_derivatives(self, image, sigma):
         """Step 3 — the second derivatives Lxx and Lyy of the Gaussian-smoothed
@@ -95,7 +104,16 @@ class ScaleInvDet:
         Returns:
             (Lxx, Lyy): each a 2D array the same shape as image.
         """
-        raise NotImplementedError("Implement this method")
+        G = self.gauss_kernel(sigma)
+        Gxx = self.gauss_2nd_deriv_kernel(sigma)
+        
+        Lxx = signal.convolve2d(image, Gxx, boundary='symm', mode='same')
+        Lxx = signal.convolve2d(Lxx, G.T, boundary='symm', mode='same')
+        
+        Lyy = signal.convolve2d(image, Gxx.T, boundary='symm', mode='same')
+        Lyy = signal.convolve2d(Lyy, G, boundary='symm', mode='same')
+        
+        return Lxx, Lyy
 
     def laplacian(self, image, sigma):
         """Step 4 — the scale-normalised Laplacian of Gaussian at one scale,
@@ -108,7 +126,8 @@ class ScaleInvDet:
         Returns:
             np.ndarray: 2D LoG response, same shape as image.
         """
-        raise NotImplementedError("Implement this method")
+        Lxx, Lyy = self.second_derivatives(image, sigma)
+        return (sigma ** 2) * (Lxx + Lyy)
 
     def build_scale_space(self, image):
         """Step 5 — the LoG response at every scale in self.sigma_vals,
@@ -120,7 +139,10 @@ class ScaleInvDet:
         Returns:
             np.ndarray: shape (m, n, num_scales) — layer k is the LoG at sigma_vals[k].
         """
-        raise NotImplementedError("Implement this method")
+        layers = []
+        for sigma in tqdm(self.sigma_vals, desc="Building scale space"):
+            layers.append(self.laplacian(image, sigma))
+        return np.dstack(layers)
 
     def candidate_points(self, scale_space):
         """Step 6 — every interior point of the scale space whose response is
@@ -133,7 +155,10 @@ class ScaleInvDet:
         Returns:
             np.ndarray: shape (P, 3) int array, one (row, col, k) per candidate.
         """
-        raise NotImplementedError("Implement this method")
+        interior = scale_space[1:-1, 1:-1, 1:-1]
+        pts = np.argwhere(interior > self.thresh)
+        pts += 1  # offset back to full volume coordinates
+        return pts
 
     def lap_max_det(self, scale_space, row, col, k):
         """Step 7 — is (row, col, k) a local maximum of the scale space,
@@ -147,7 +172,11 @@ class ScaleInvDet:
         Returns:
             list: [magnitude, row, col, sigma] if it is a maximum, else [].
         """
-        raise NotImplementedError("Implement this method")
+        val = scale_space[row, col, k]
+        block = scale_space[row-1:row+2, col-1:col+2, k-1:k+2]
+        if val + 0.001 > np.max(block):
+            return [val, row, col, self.sigma_vals[k]]
+        return []
 
     def find_maxima(self, scale_space):
         """Step 8 — every candidate point that is a local maximum.
@@ -159,7 +188,15 @@ class ScaleInvDet:
             np.ndarray: shape (N, 4); each row is [magnitude, row, col, sigma].
                         Shape (0, 4) if there are none.
         """
-        raise NotImplementedError("Implement this method")
+        maxima = []
+        for row, col, k in tqdm(self.candidate_points(scale_space), desc="Finding maxima"):
+            result = self.lap_max_det(scale_space, row, col, k)
+            if result:
+                maxima.append(result)
+        
+        if not maxima:
+            return np.empty((0, 4))
+        return np.array(maxima)
 
     def blob_circles(self, maxima):
         """Step 9 — the circle that describes each blob: its centre, and a
@@ -171,7 +208,8 @@ class ScaleInvDet:
         Returns:
             np.ndarray: shape (N, 3) int array; each row is [row, col, radius].
         """
-        raise NotImplementedError("Implement this method")
+        radius = np.ceil(maxima[:, 3] * np.sqrt(2))
+        return np.column_stack((maxima[:, 1], maxima[:, 2], radius)).astype(int)
 
     def detect_blobs(self, image):
         """Step 10 — run the whole pipeline using the methods above.
@@ -185,4 +223,7 @@ class ScaleInvDet:
         Returns:
             np.ndarray: shape (N, 3) int array of [row, col, radius], one per blob.
         """
-        raise NotImplementedError("Implement this method")
+        self.laplace_scale_space = self.build_scale_space(image)
+        self.maxima = self.find_maxima(self.laplace_scale_space)
+        self.blobs = self.blob_circles(self.maxima)
+        return self.blobs
